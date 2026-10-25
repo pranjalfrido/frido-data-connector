@@ -1,0 +1,8 @@
+node_modules
+.env
+logs
+*.test.js
+test*.js
+debug_*.js
+query_*.js
+cloudrun-env.yaml

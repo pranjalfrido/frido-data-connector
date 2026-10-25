@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.*
+sa_key.json
+*sa_key*.json
+*service-account*.json
+*service_account*.json
+*.pem
+logs/
+cloudrun-env.yaml

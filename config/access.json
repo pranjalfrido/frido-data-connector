@@ -1,0 +1,87 @@
+{
+  "roles": {
+    "founder": {
+      "allowed_tools": ["run_command"],
+      "allowed_targets": ["bigquery", "supabase", "repo"],
+      "allowed_tables": [
+        "production.fact_all_platform_sales_report",
+        "production.Clickpost_Shipment_Tracking_Report",
+        "production.Aggregated_uniware_sales_report",
+        "production.pincode_city_master",
+        "sharepoint_to_gcp.Frido_Item_Master__frido_item_sku_master",
+        "sharepoint_to_gcp.Frido_Item_Master__productid_sku_mapping",
+        "inv_snapshot",
+        "sales_window",
+        "item_master",
+        "cogs_ledger",
+        "facility_master",
+        "sales_90d"
+      ],
+      "denied_columns": []
+    },
+    "finance": {
+      "allowed_tools": ["run_command"],
+      "allowed_targets": ["bigquery", "supabase", "repo"],
+      "allowed_tables": [
+        "production.fact_all_platform_sales_report",
+        "production.Aggregated_uniware_sales_report",
+        "sharepoint_to_gcp.Frido_Item_Master__frido_item_sku_master",
+        "inv_snapshot",
+        "cogs_ledger",
+        "item_master",
+        "sales_90d"
+      ],
+      "denied_columns": []
+    },
+    "ops": {
+      "allowed_tools": ["run_command"],
+      "allowed_targets": ["bigquery", "supabase", "repo"],
+      "allowed_tables": [
+        "production.Clickpost_Shipment_Tracking_Report",
+        "production.Aggregated_uniware_sales_report",
+        "production.pincode_city_master",
+        "sharepoint_to_gcp.Frido_Item_Master__frido_item_sku_master",
+        "sharepoint_to_gcp.Frido_Item_Master__productid_sku_mapping",
+        "inv_snapshot",
+        "sales_window",
+        "item_master",
+        "facility_master",
+        "sales_90d"
+      ],
+      "denied_columns": []
+    },
+    "marketing": {
+      "allowed_tools": ["run_command"],
+      "allowed_targets": ["bigquery", "repo"],
+      "allowed_tables": [
+        "production.fact_all_platform_sales_report",
+        "production.Clickpost_Shipment_Tracking_Report",
+        "production.pincode_city_master",
+        "sharepoint_to_gcp.Frido_Item_Master__frido_item_sku_master"
+      ],
+      "denied_columns": []
+    },
+    "analyst": {
+      "allowed_tools": ["run_command"],
+      "allowed_targets": ["bigquery", "supabase", "repo"],
+      "allowed_tables": [
+        "production.fact_all_platform_sales_report",
+        "production.Clickpost_Shipment_Tracking_Report",
+        "production.Aggregated_uniware_sales_report",
+        "production.pincode_city_master",
+        "sharepoint_to_gcp.Frido_Item_Master__frido_item_sku_master",
+        "sharepoint_to_gcp.Frido_Item_Master__productid_sku_mapping",
+        "inv_snapshot",
+        "sales_window",
+        "item_master",
+        "facility_master",
+        "sales_90d"
+      ],
+      "denied_columns": []
+    }
+  },
+  "pii_columns": [
+    "customer_name", "customer_email", "customer_phone",
+    "phone", "email", "address", "mobile", "contact"
+  ]
+}

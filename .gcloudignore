@@ -1,0 +1,11 @@
+# Tell gcloud what NOT to upload for Cloud Build
+# (This overrides .gitignore for gcloud builds submit)
+node_modules/
+.env
+.env.*
+logs/
+*.test.js
+test*.js
+debug_*.js
+query_*.js
+# cloudrun-env.yaml and sa_key.json ARE needed in the build context for Docker

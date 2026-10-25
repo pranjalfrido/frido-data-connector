@@ -1,0 +1,28 @@
+{
+  "bigquery": [
+    "frido-429506.production.fact_all_platform_sales_report",
+    "frido-429506.production.Clickpost_Shipment_Tracking_Report",
+    "frido-429506.production.Aggregated_uniware_sales_report",
+    "frido-429506.production.fact_shopify_inventory",
+    "frido-429506.production.fact_shopify_international_orders",
+    "frido-429506.production.pincode_city_master",
+    "frido-429506.sharepoint_to_gcp.Frido_Item_Master__frido_item_sku_master",
+    "frido-429506.sharepoint_to_gcp.Frido_Item_Master__productid_sku_mapping",
+    "frido-429506.Frido_BigQuery.Frido_Unicommerce_3_Inventory_Snapshot_Inventory_Snapshot"
+  ],
+  "supabase": [
+    "inv_snapshot",
+    "sales_window",
+    "item_master",
+    "cogs_ledger",
+    "facility_master",
+    "sku_mapping",
+    "shopify_inv",
+    "sales_90d",
+    "uc_channel_desc",
+    "state_region_nearest_wh",
+    "user_profiles",
+    "user_permissions",
+    "packaging_sku_master"
+  ]
+}

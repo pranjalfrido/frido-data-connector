@@ -1,0 +1,34 @@
+{
+  "repo": "pranjalfrido/Unified_Dashboard_Frido",
+  "branch": "main",
+  "allowed": [
+    "api/_bq.js",
+    "api/_inventory_shared.js",
+    "api/_db.js",
+    "api/bq.js",
+    "api/logistics.js",
+    "api/inventory.js",
+    "api/return-analysis.js",
+    "api/returns.js",
+    "api/inward.js",
+    "api/customer.js",
+    "api/cogs-monthly.js",
+    "api/cogs-context.js",
+    "api/logistics-cost.js",
+    "api/sales-allocation.js",
+    "api/courier-allocation.js",
+    "src/utils.js",
+    "api/data/*",
+    "CLAUDE.md"
+  ],
+  "blocked": [
+    ".env",
+    ".env.local",
+    ".env.example",
+    "sa_key.json",
+    "node_modules",
+    "dist",
+    ".github",
+    ".vercel"
+  ]
+}
