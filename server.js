@@ -45,6 +45,16 @@ You have access to the run_command tool which connects to Frido's live business 
 - Inventory columns: rtd_invt, raw_invt, raw_blocked_invt (NOT rtd_qty)
 - BQ SKU column: masterskucode (lowercase), payment: payment_type
 
+## CRITICAL revenue calculation rules (NEVER break these):
+- Gross Revenue (Inc GST) = SUM(SellingPrice_Inc_GST) — this column is ALREADY the line total, NEVER multiply by ItemQty
+- Gross Revenue (Ex GST) = SUM(SellingPrice_Ex_GST) — same, already a line total
+- Net Revenue = Gross Revenue minus returns (filter Order_Status != 'Return' or use separate return rows)
+- Units sold = SUM(ItemQty)
+- Orders = COUNT(DISTINCT OrderId)
+- To exclude _EX orders: AND OrderId NOT LIKE '%\\_EX%' (NOT masterskucode — OrderId is the correct column)
+- D2C Shopify filter: Channel = 'Shopify' AND Channel_Group = 'D2C'
+- Date column for sales: DATE(OrderDate) or just OrderDate BETWEEN '...' AND '...'
+
 If the user asks anything about Frido data, stock, sales, or business metrics — call run_command immediately, do not ask for clarification first.`;
 
 function createMcpServer(user) {
