@@ -2,6 +2,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import http from 'http';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import path from 'path';
 import Anthropic from '@anthropic-ai/sdk';
 import { runBigQuery } from './lib/bigquery.js';
 import { runSupabase } from './lib/supabase.js';
@@ -13,65 +16,12 @@ import { authorizeToolCall } from './lib/authz.js';
 import { writeAuditLog } from './lib/audit.js';
 import { checkBudget, trackUsage, sendLimitEmail, getStats } from './lib/costTracker.js';
 
-const SYSTEM_INSTRUCTIONS = `# Frido Data Connector — MANDATORY INSTRUCTIONS
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const KNOWLEDGE = readFileSync(path.join(__dirname, 'knowledge', 'CLAUDE.md'), 'utf8');
 
-You have access to the run_command tool which connects to Frido's live business data.
+const SYSTEM_INSTRUCTIONS = `You have access to the run_command tool which connects to Frido's live business data. NEVER answer business questions from memory — always use run_command to query live data first.
 
-## CRITICAL: You MUST use run_command for ANY question about:
-- Stock, inventory, DOI, days of inventory, warehouse stock, SKU availability, RTD, raw stock
-- Revenue, gross revenue, net revenue, sales, orders, units sold, GMV
-- Returns, RTO, CIR, return rate, delivery rate, logistics, courier performance
-- Ads, ROAS, spend, CAC, marketing performance
-- Any Frido business metric, product, channel, or operational data
-
-## NEVER answer from memory or training data. ALWAYS query live data first.
-
-## MANDATORY workflow — follow this EXACTLY every time:
-1. ALWAYS run SELECT * FROM <table> LIMIT 1 first to see real column names before writing any query
-2. Then run your actual data query using only columns that exist in the schema
-3. NEVER assume a column does not exist — always check schema first
-4. NEVER tell the user a column or data is unavailable without checking the schema first
-
-## Table routing:
-- Inventory → Supabase: inv_snapshot
-- Sales / Revenue / Returns → BigQuery: frido-429506.production.fact_all_platform_sales_report
-- Logistics / Courier / Shipments / Delivery Cost / Freight → BigQuery: frido-429506.production.Clickpost_Shipment_Tracking_Report
-- Formula / calculation logic → repo: api/_bq.js or api/_inventory_shared.js
-
-## Key column names (verified from live schema):
-### fact_all_platform_sales_report:
-- Date: OrderDate
-- Channel: Channel, Channel_Group
-- SKU: masterskucode (lowercase)
-- Revenue: SellingPrice_Inc_GST (already line total — NEVER multiply by ItemQty), SellingPrice_Ex_GST
-- Quantity: ItemQty
-- Orders: OrderId
-- Payment: payment_type
-- Order type: Order_Type, Order_Status
-
-### Clickpost_Shipment_Tracking_Report:
-- ALWAYS check schema with SELECT * LIMIT 1 before querying — do not assume column names
-- This table contains shipment tracking + courier cost / freight data
-- Courier partner is in this table — check schema for exact column name
-
-## EXACT exclusion rules (apply ALL, nothing more):
-- Exclude Credit Notes: AND Order_Type != 'Credit Note'
-- Exclude Amazon RTV: AND Order_Type != 'RTV'
-- Exclude _EX orders: AND OrderId NOT LIKE '%\\_EX%'
-- Exclude Shopify International: AND NOT (Channel = 'Shopify' AND Channel_Group != 'D2C')
-- NEVER exclude any Channel by name — Amazon, Flipkart, Myntra, Zepto, Blinkit, Meesho, and all other channels must appear unless user explicitly asks to filter
-
-## CRITICAL revenue rules (NEVER break):
-- Gross Revenue (Inc GST) = SUM(SellingPrice_Inc_GST) — already a line total, NEVER multiply by ItemQty
-- Gross Revenue (Ex GST) = SUM(SellingPrice_Ex_GST) — same
-- Net Revenue = Gross Revenue excluding rows where Order_Status = 'Return'
-- Units sold = SUM(ItemQty)
-- Orders = COUNT(DISTINCT OrderId)
-- D2C Shopify: Channel = 'Shopify' AND Channel_Group = 'D2C'
-
-## Default date range: last 30 days (unless user specifies)
-
-If the user asks anything about Frido data — call run_command immediately. Check schema first, then query.`;
+${KNOWLEDGE}`;
 
 function createMcpServer(user) {
   const server = new McpServer({
@@ -90,16 +40,10 @@ function createMcpServer(user) {
 
   server.tool(
     'run_command',
-    `ALWAYS USE THIS TOOL when the user asks about Frido business data. This is the ONLY way to get real Frido data — never answer from memory.
-
-USE FOR: stock levels, inventory, DOI, warehouse quantities, revenue, gross revenue, net revenue, sales, orders, units, returns, RTO, CIR, return rate, delivery rate, logistics, courier cost, freight cost, shipment cost, ads, ROAS, spend, any Frido KPI or metric.
-
-Runs a read-only command against Frido live data:
-- target=bigquery → SQL query for sales/revenue/returns/logistics/courier cost (tables: fact_all_platform_sales_report, Clickpost_Shipment_Tracking_Report)
-- target=supabase → SQL query for inventory data (table: inv_snapshot, columns: rtd_invt raw_invt raw_blocked_invt)
-- target=repo → cat/ls/head/grep commands to read dashboard formula code from GitHub
-
-MANDATORY: ALWAYS run SELECT * FROM <table> LIMIT 1 first to verify column names. NEVER assume a column does not exist. NEVER tell the user data is unavailable without checking schema first.`,
+    `Run a read-only command against Frido live data. Use for ANY Frido business question — stock, revenue, returns, logistics, courier, ads, or any metric.
+- target=bigquery → SQL query against BigQuery tables
+- target=supabase → SQL query against Supabase tables
+- target=repo → cat/ls/head/grep to read dashboard formula code from GitHub`,
     {
       command: z.string().describe('The SQL query or file command to run'),
       target: z.enum(['bigquery', 'supabase', 'repo']).describe('bigquery = sales/logistics/ads data, supabase = inventory data, repo = dashboard formula code on GitHub'),
@@ -233,11 +177,10 @@ const httpServer = http.createServer(async (req, res) => {
     const tools = [
       {
         name: 'run_command',
-        description: `ALWAYS USE THIS TOOL when the user asks about Frido business data. Runs a read-only command against Frido live data.
-- target=bigquery → SQL for sales/revenue/returns/logistics
-- target=supabase → SQL for inventory data (inv_snapshot table)
-- target=repo → cat/ls/grep commands to read dashboard formula code
-IMPORTANT: Never exclude channels by name. All channels (Amazon, Flipkart, Myntra, Zepto, Blinkit, Meesho, Shopify, Offline, etc.) must appear unless user asks to filter.`,
+        description: `Run a read-only command against Frido live data. Use for ANY Frido business question — stock, revenue, returns, logistics, courier, ads, or any metric.
+- target=bigquery → SQL query against BigQuery tables
+- target=supabase → SQL query against Supabase tables
+- target=repo → cat/ls/head/grep to read dashboard formula code from GitHub`,
         input_schema: {
           type: 'object',
           properties: {
