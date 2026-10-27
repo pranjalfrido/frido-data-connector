@@ -40,7 +40,7 @@ Always read `api/_bq.js` for the exact formula before writing SQL for these.
 |---|---|---|
 | Gross Revenue (Inc/Exc GST) | `api/_bq.js` → `netRevenueSelectFragment()` | SUM of SellingPrice columns |
 | Net Revenue | `api/_bq.js` → `computeNetRevenueMeasures()` | Gross × Retained Share |
-| RTO % | `api/_bq.js` | Order_Status = 'RTO', divided by Gross Inc GST |
+| RTO % | locked formula below | **REVENUE-BASED** — RTO Revenue ÷ Gross Revenue (Inc GST) × 100. NEVER order-count-based. See "EXACT formula for RTO %" section. |
 | CIR % | `api/_bq.js` | Order_Status = 'CIR', divided by Gross Inc GST |
 | Returns % | locked formula below | Mature window (today-44d to today-14d), NOT selected date range — see "EXACT SQL for SKU return %" section |
 | Delivery Rate | `api/logistics.js` | Delivered / Total shipments |
@@ -234,6 +234,45 @@ LIMIT 10
 - Flipkart uses a different formula: `(Return + RTO revenue) / total_rev` only — NOT CIR or Cancel.
 - Myntra uses `FulfilmentStatus` for cancellations, not `Order_Status`.
 - Never use `Order_Status = 'Return'` alone — that misses RTO and CIR which are the bigger buckets.
+
+## EXACT formula for RTO % — use this, never invent
+
+**RTO % is REVENUE-BASED, not order-count-based.**
+
+Correct formula (matches dashboard):
+```
+RTO % = SUM(SellingPrice_Inc_GST WHERE Order_Status = 'RTO') / SUM(SellingPrice_Inc_GST) × 100
+```
+
+**Wrong formula — never use this:**
+```
+❌ RTO orders / (Delivered orders + RTO orders)   ← order-count ratio, always wrong
+```
+
+### EXACT SQL for RTO % over a date range
+```sql
+SELECT
+  ROUND(
+    SAFE_DIVIDE(
+      SUM(CASE WHEN Order_Status = 'RTO' THEN SellingPrice_Inc_GST ELSE 0 END),
+      SUM(SellingPrice_Inc_GST)
+    ) * 100, 2
+  ) AS rto_pct,
+  SUM(CASE WHEN Order_Status = 'RTO' THEN SellingPrice_Inc_GST ELSE 0 END) AS rto_revenue,
+  SUM(SellingPrice_Inc_GST) AS gross_revenue_inc_gst
+FROM `frido-429506.production.fact_all_platform_sales_report`
+WHERE OrderDate BETWEEN '${start}' AND '${end}'
+  AND NOT (OrderId LIKE '%_EX%')
+  AND NOT (Channel = 'offline_sales' AND COALESCE(Order_Status, '') = 'Credit Note')
+  AND NOT (Channel = 'Amazon' AND COALESCE(Order_Status, '') = 'RTV (Return to vendor)')
+```
+
+**Critical rules:**
+- Denominator is **gross revenue (Inc GST)** — SUM of ALL `SellingPrice_Inc_GST` rows in the period, not just delivered orders.
+- Numerator is revenue of rows where `Order_Status = 'RTO'` only.
+- Always exclude `_EX` orders, Credit Notes, and Amazon RTV (same as all revenue queries).
+- For "this week" use `DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY))` to `CURRENT_DATE()`.
+- For channel-level RTO %, add `GROUP BY Channel` and keep the same denominator logic.
 
 ## When to ask vs assume
 Ask ONLY if the ambiguity would change the number materially:
