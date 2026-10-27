@@ -290,6 +290,10 @@ JOIN facility_master f ON i.facility = f.facility
 WHERE f.fcs_status_for_invt = 'Live'
   AND i.item_sku_code NOT ILIKE '%COUP%'
   AND i.item_sku_code NOT ILIKE '%DFA%'
+  AND EXISTS (
+    SELECT 1 FROM item_master m
+    WHERE m.product_code = REGEXP_REPLACE(i.item_sku_code, '(_RAW)?(_PO[0-9]+)?$', '')
+  )  -- exclude Uncategorized SKUs (not in item_master) — dashboard excludes these too, ~48K units / 652 SKUs
 ```
 
 **Critical rules — never break these:**
