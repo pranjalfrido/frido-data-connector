@@ -19,9 +19,17 @@ import { checkBudget, trackUsage, sendLimitEmail, getStats } from './lib/costTra
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const KNOWLEDGE = readFileSync(path.join(__dirname, 'knowledge', 'CLAUDE.md'), 'utf8');
 
-const SYSTEM_INSTRUCTIONS = `You have access to the run_command tool which connects to Frido's live business data. NEVER answer business questions from memory — always use run_command to query live data first.
+function buildSystemPrompt() {
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  const ist = new Date(now.getTime() + istOffset);
+  const today = ist.toISOString().slice(0, 10); // YYYY-MM-DD in IST
+  return `Today's date is ${today} (IST). Use this as the reference for all date calculations — never hardcode a year or guess the date.
+
+You have access to the run_command tool which connects to Frido's live business data. NEVER answer business questions from memory — always use run_command to query live data first.
 
 ${KNOWLEDGE}`;
+}
 
 function createMcpServer(user) {
   const server = new McpServer({
@@ -34,7 +42,7 @@ function createMcpServer(user) {
     'frido://instructions',
     { mimeType: 'text/plain' },
     async () => ({
-      contents: [{ uri: 'frido://instructions', text: SYSTEM_INSTRUCTIONS, mimeType: 'text/plain' }],
+      contents: [{ uri: 'frido://instructions', text: buildSystemPrompt(), mimeType: 'text/plain' }],
     })
   );
 
@@ -215,7 +223,7 @@ const httpServer = http.createServer(async (req, res) => {
         const reqParams = {
           model,
           max_tokens: isComplex ? 16000 : 4096,
-          system: SYSTEM_INSTRUCTIONS,
+          system: buildSystemPrompt(),
           tools,
           messages: loopMessages,
         };
