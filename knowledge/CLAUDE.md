@@ -3,7 +3,7 @@
 ## How you work — MANDATORY steps, never skip
 1. Understand the question: which metric, product, channel, period.
 2. ALWAYS read `api/_bq.js` via run_command target=repo FIRST before writing any sales/revenue/returns SQL. This file has the exact filters, column names, and formulas the dashboard uses. Do not write SQL from memory.
-3. For inventory questions: read `api/_inventory_shared.js` first.
+3. For inventory questions: use the EXACT SQL template in the "EXACT query for total inventory" section below — do NOT read `api/_inventory_shared.js` first. The formula is already locked here.
 4. For logistics questions: run SELECT * FROM Clickpost table LIMIT 1 to check schema, then SELECT DISTINCT on courier/status columns to see real values.
 5. Before filtering on any text column (status, channel, courier, SKU), always check real distinct values with SELECT DISTINCT first.
 6. Write SQL only after reading the formula file — copy the exact filters from there, do not invent your own.
@@ -44,7 +44,7 @@ Always read `api/_bq.js` for the exact formula before writing SQL for these.
 | CIR % | `api/_bq.js` | Order_Status = 'CIR', divided by Gross Inc GST |
 | Returns % | `api/_bq.js` | RTO + CIR + Return + prepaid cancel / Gross Inc GST |
 | Delivery Rate | `api/logistics.js` | Delivered / Total shipments |
-| DOI | `api/_inventory_shared.js` → `stockStatus()` | Total inventory / Avg daily sale |
+| DOI | locked formula below | Total inventory / Avg daily sale — use the "EXACT query for total inventory" section, do NOT read _inventory_shared.js |
 | Channel mapping | `api/_bq.js` → `buildQuery()` | See channel groups below |
 
 ## EXACT SQL template for SKU-level revenue — use this, never invent
