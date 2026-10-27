@@ -34,18 +34,143 @@
 
 ## Known metrics — reuse these, don't regenerate
 
-Always read `api/_bq.js` for the exact formula before writing SQL for these.
+All percentage metrics below are **REVENUE-BASED** (÷ Gross Revenue Inc GST), never order-count-based. Locked SQL is in the sections below — use it directly, do not read `api/_bq.js` first.
 
 | Metric | Formula location | Key notes |
 |---|---|---|
-| Gross Revenue (Inc/Exc GST) | `api/_bq.js` → `netRevenueSelectFragment()` | SUM of SellingPrice columns |
-| Net Revenue | `api/_bq.js` → `computeNetRevenueMeasures()` | Gross × Retained Share |
+| Gross Revenue (Inc/Exc GST) | locked formula below | SUM(SellingPrice_Inc_GST) / SUM(SellingPrice_Exc_GST) — see "EXACT formula for Gross Revenue" |
+| Net Revenue | locked formula below | Gross Exc GST × Retained Share after returns/cancels — see "EXACT formula for Net Revenue" |
 | RTO % | locked formula below | **REVENUE-BASED** — RTO Revenue ÷ Gross Revenue (Inc GST) × 100. NEVER order-count-based. See "EXACT formula for RTO %" section. |
-| CIR % | `api/_bq.js` | Order_Status = 'CIR', divided by Gross Inc GST |
+| CIR % | locked formula below | **REVENUE-BASED** — CIR Revenue ÷ Gross Revenue (Inc GST) × 100. NEVER order-count-based. See "EXACT formula for CIR %" section. |
 | Returns % | locked formula below | Mature window (today-44d to today-14d), NOT selected date range — see "EXACT SQL for SKU return %" section |
-| Delivery Rate | `api/logistics.js` | Delivered / Total shipments |
+| Delivery Rate | locked formula below | Delivered shipments ÷ Total shipments (Clickpost) — see "EXACT formula for Delivery Rate" |
 | DOI | locked formula below | Total inventory / Avg daily sale — use the "EXACT query for total inventory" section, do NOT read _inventory_shared.js |
-| Channel mapping | `api/_bq.js` → `buildQuery()` | See channel groups below |
+| Channel mapping | locked below | See channel groups section |
+
+## EXACT formula for Gross Revenue — use this, never invent
+
+```sql
+SELECT
+  SUM(SellingPrice_Inc_GST) AS gross_revenue_inc_gst,
+  SUM(SellingPrice_Exc_GST) AS gross_revenue_exc_gst,
+  COUNT(DISTINCT OrderId) AS orders,
+  SUM(ItemQty) AS units
+FROM `frido-429506.production.fact_all_platform_sales_report`
+WHERE OrderDate BETWEEN '${start}' AND '${end}'
+  AND NOT (OrderId LIKE '%_EX%')
+  AND NOT (Channel = 'offline_sales' AND COALESCE(Order_Status, '') = 'Credit Note')
+  AND NOT (Channel = 'Amazon' AND COALESCE(Order_Status, '') = 'RTV (Return to vendor)')
+```
+- Include ALL `Order_Status` values (Delivered, RTO, CIR, Return, Cancelled, etc.) — gross revenue is the full top line before any deductions.
+- Add `GROUP BY Channel` or `GROUP BY masterskucode` as needed.
+
+## EXACT formula for Net Revenue — use this, never invent
+
+Net Revenue = Gross Revenue Exc GST × Retained Share, where Retained Share accounts for RTO/CIR/Returns/Cancels using mature-window rates.
+
+```sql
+WITH base AS (
+  SELECT
+    SUM(SellingPrice_Exc_GST) AS gross_exc_gst,
+    SUM(SellingPrice_Inc_GST) AS gross_inc_gst,
+    SAFE_DIVIDE(
+      SUM(CASE WHEN Order_Status = 'RTO'       THEN SellingPrice_Exc_GST ELSE 0 END),
+      SUM(SellingPrice_Exc_GST)
+    ) AS rto_pct,
+    SAFE_DIVIDE(
+      SUM(CASE WHEN Order_Status = 'CIR'       THEN SellingPrice_Exc_GST ELSE 0 END),
+      SUM(SellingPrice_Exc_GST)
+    ) AS cir_pct,
+    SAFE_DIVIDE(
+      SUM(CASE WHEN Order_Status = 'Return'    THEN SellingPrice_Exc_GST ELSE 0 END),
+      SUM(SellingPrice_Exc_GST)
+    ) AS return_pct,
+    SAFE_DIVIDE(
+      SUM(CASE WHEN Order_Status = 'Cancelled' AND payment_type != 'COD'
+                                               THEN SellingPrice_Exc_GST ELSE 0 END),
+      SUM(SellingPrice_Exc_GST)
+    ) AS prepaid_cancel_pct
+  FROM `frido-429506.production.fact_all_platform_sales_report`
+  -- Mature window for rates (today-44d to today-14d) — NOT the user's date range
+  WHERE OrderDate BETWEEN DATE_SUB(DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY), INTERVAL 29 DAY)
+                      AND DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
+    AND NOT (OrderId LIKE '%_EX%')
+    AND NOT (Channel = 'offline_sales' AND COALESCE(Order_Status, '') = 'Credit Note')
+    AND NOT (Channel = 'Amazon' AND COALESCE(Order_Status, '') = 'RTV (Return to vendor)')
+),
+current_gross AS (
+  SELECT SUM(SellingPrice_Exc_GST) AS gross_exc_gst
+  FROM `frido-429506.production.fact_all_platform_sales_report`
+  WHERE OrderDate BETWEEN '${start}' AND '${end}'
+    AND NOT (OrderId LIKE '%_EX%')
+    AND NOT (Channel = 'offline_sales' AND COALESCE(Order_Status, '') = 'Credit Note')
+    AND NOT (Channel = 'Amazon' AND COALESCE(Order_Status, '') = 'RTV (Return to vendor)')
+)
+SELECT
+  cg.gross_exc_gst AS gross_revenue_exc_gst,
+  ROUND(cg.gross_exc_gst * (1 - b.rto_pct - b.cir_pct - b.return_pct - b.prepaid_cancel_pct), 0) AS net_revenue
+FROM current_gross cg, base b
+```
+- Return/cancel rates always come from the **mature window** (today-44d to today-14d), applied against the **current period** gross. Never use current-period rates for net revenue — recent orders haven't settled yet and will give artificially high net revenue.
+- COD cancellations are excluded from the cancel deduction (only prepaid cancels are deducted).
+
+## EXACT formula for CIR % — use this, never invent
+
+**CIR % is REVENUE-BASED, not order-count-based.**
+
+Correct formula (matches dashboard):
+```
+CIR % = SUM(SellingPrice_Inc_GST WHERE Order_Status = 'CIR') / SUM(SellingPrice_Inc_GST) × 100
+```
+
+**Wrong formula — never use this:**
+```
+❌ CIR orders / (Delivered orders + CIR orders)   ← order-count ratio, always wrong
+❌ CIR orders / Total orders                       ← order-count ratio, always wrong
+```
+
+```sql
+SELECT
+  ROUND(
+    SAFE_DIVIDE(
+      SUM(CASE WHEN Order_Status = 'CIR' THEN SellingPrice_Inc_GST ELSE 0 END),
+      SUM(SellingPrice_Inc_GST)
+    ) * 100, 2
+  ) AS cir_pct,
+  SUM(CASE WHEN Order_Status = 'CIR' THEN SellingPrice_Inc_GST ELSE 0 END) AS cir_revenue,
+  SUM(SellingPrice_Inc_GST) AS gross_revenue_inc_gst
+FROM `frido-429506.production.fact_all_platform_sales_report`
+WHERE OrderDate BETWEEN '${start}' AND '${end}'
+  AND NOT (OrderId LIKE '%_EX%')
+  AND NOT (Channel = 'offline_sales' AND COALESCE(Order_Status, '') = 'Credit Note')
+  AND NOT (Channel = 'Amazon' AND COALESCE(Order_Status, '') = 'RTV (Return to vendor)')
+```
+- Denominator is **all rows' revenue** in the period — not just delivered orders.
+- Add `GROUP BY Channel` for channel-level breakdown.
+
+## EXACT formula for Delivery Rate — use this, never invent
+
+Delivery Rate comes from `Clickpost_Shipment_Tracking_Report` (forward shipments only by default).
+
+```sql
+SELECT
+  ROUND(
+    SAFE_DIVIDE(
+      COUNTIF(clickpost_unified_status = 'Delivered'
+        OR (clickpost_unified_status = 'NoStatusExist' AND LOWER(latest_remark) LIKE '%delivered%')),
+      COUNT(*)
+    ) * 100, 2
+  ) AS delivery_rate_pct,
+  COUNTIF(clickpost_unified_status = 'Delivered'
+    OR (clickpost_unified_status = 'NoStatusExist' AND LOWER(latest_remark) LIKE '%delivered%')) AS delivered,
+  COUNT(*) AS total_shipments
+FROM `frido-429506.production.Clickpost_Shipment_Tracking_Report`
+WHERE DATE(created_at) BETWEEN '${start}' AND '${end}'
+  AND shipment_type = 'forward'
+```
+- Always forward shipments only unless user explicitly asks for reverse.
+- Delivered definition: `clickpost_unified_status = 'Delivered'` OR (`= 'NoStatusExist'` AND `latest_remark LIKE '%delivered%'`).
+- Add `GROUP BY courier_partner_name` for courier-level breakdown.
 
 ## EXACT SQL template for SKU-level revenue — use this, never invent
 ```sql
