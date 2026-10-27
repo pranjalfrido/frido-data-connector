@@ -503,22 +503,29 @@ If your calculation for FR-ERFT-B1 gives a materially different avg daily sale, 
 
 ### EXACT SQL — Step 1+2: find longest in-stock run
 **Always filter by SKU first** — never scan all SKUs for 180 days, it will time out.
+
+Column names in `historical_inventory_till_date_UC` are CamelCase:
+- Date column: `inventory_date` (DATE)
+- SKU column: `ItemSkuCode` (STRING)
+- Facility column: `Facility` (STRING)
+- Stock columns: `Inventory` (INT64), `InventoryBlocked` (INT64)
+
 ```sql
 WITH daily_stock AS (
   -- Stock per SKU per day, summed across all Live facilities
-  -- CRITICAL: filter item_sku_code LIKE '${sku}%' first to avoid full table scan
+  -- CRITICAL: filter ItemSkuCode LIKE '${sku}%' first to avoid full table scan
   SELECT
-    REGEXP_REPLACE(item_sku_code, r'(_RAW)?(_PO\d+)?$', '') AS master_sku,
-    snapshot_date,
+    REGEXP_REPLACE(h.ItemSkuCode, r'(_RAW)?(_PO\d+)?$', '') AS master_sku,
+    h.inventory_date AS snapshot_date,
     SUM(
-      (COALESCE(inventory, 0) + COALESCE(inventory_blocked, 0))
-      * COALESCE(CAST(REGEXP_EXTRACT(item_sku_code, r'_PO(\d+)') AS INT64), 1)
+      (COALESCE(h.Inventory, 0) + COALESCE(h.InventoryBlocked, 0))
+      * COALESCE(CAST(REGEXP_EXTRACT(h.ItemSkuCode, r'_PO(\d+)') AS INT64), 1)
     ) AS stock_units
   FROM `frido-429506.production.historical_inventory_till_date_UC` h
-  JOIN `frido-429506.sharepoint_to_gcp.Frido_Item_Master__frido_item_sku_master` im
-    ON REGEXP_REPLACE(h.item_sku_code, r'(_RAW)?(_PO\d+)?$', '') = im.masterskucode
-  WHERE h.item_sku_code LIKE '${sku}%'   -- ← MANDATORY: filter by SKU prefix first
-    AND snapshot_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 180 DAY)
+  JOIN `frido-429506.production.facility_master` f ON h.Facility = f.facility
+  WHERE h.ItemSkuCode LIKE '${sku}%'   -- ← MANDATORY: filter by SKU prefix first
+    AND h.inventory_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 180 DAY)
+    AND f.fcs_status_for_invt = 'Live'
   GROUP BY master_sku, snapshot_date
 ),
 in_stock_days AS (
