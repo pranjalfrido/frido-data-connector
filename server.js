@@ -19,11 +19,15 @@ import { checkBudget, trackUsage, sendLimitEmail, getStats } from './lib/costTra
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const KNOWLEDGE = readFileSync(path.join(__dirname, 'knowledge', 'CLAUDE.md'), 'utf8');
 
+const TOOL_DESCRIPTION = `Run a read-only command against Frido live data. Use for ANY Frido business question — stock, revenue, returns, logistics, courier, ads, or any metric.
+- target=bigquery → SQL query against BigQuery tables
+- target=supabase → SQL query against Supabase tables
+- target=repo → cat/ls/head/grep to read dashboard formula code from GitHub`;
+
 function buildSystemPrompt() {
   const now = new Date();
-  const istOffset = 5.5 * 60 * 60 * 1000;
-  const ist = new Date(now.getTime() + istOffset);
-  const today = ist.toISOString().slice(0, 10); // YYYY-MM-DD in IST
+  const ist = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+  const today = ist.toISOString().slice(0, 10);
   return `Today's date is ${today} (IST). Use this as the reference for all date calculations — never hardcode a year or guess the date.
 
 You have access to the run_command tool which connects to Frido's live business data. NEVER answer business questions from memory — always use run_command to query live data first.
@@ -31,11 +35,49 @@ You have access to the run_command tool which connects to Frido's live business 
 ${KNOWLEDGE}`;
 }
 
+// Single tool executor — used by both MCP and /chat
+async function executeTool(user, command, target) {
+  const start = Date.now();
+
+  const authzResult = authorizeToolCall(user, 'run_command', target);
+  if (!authzResult.ok) {
+    writeAuditLog({ user, tool: 'run_command', target, command, outcome: 'denied', denialReason: authzResult.message, latencyMs: Date.now() - start });
+    log({ user: user.email, role: user.role, target, command, allowed: false, reason: authzResult.message, duration: Date.now() - start });
+    return { ok: false, text: authzResult.message };
+  }
+
+  if (!isAllowed(command, target)) {
+    const reason = blockReason(command, target);
+    writeAuditLog({ user, tool: 'run_command', target, command, outcome: 'denied', denialReason: reason, latencyMs: Date.now() - start });
+    log({ user: user.email, role: user.role, target, command, allowed: false, reason, duration: Date.now() - start });
+    return { ok: false, text: `Not permitted: ${reason}` };
+  }
+
+  try {
+    let result;
+    if (target === 'bigquery') result = await runBigQuery(command);
+    else if (target === 'supabase') result = await runSupabase(command);
+    else result = await runRepo(command);
+
+    const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+    const truncated = text.length > 50000;
+    const output = truncated ? text.slice(0, 50000) + '\n\n[truncated: true]' : text;
+    const latencyMs = Date.now() - start;
+
+    writeAuditLog({ user, tool: 'run_command', target, command, outcome: 'ok', rowsReturned: text.split('\n').length, latencyMs });
+    log({ user: user.email, role: user.role, target, command, allowed: true, resultSize: text.length, truncated, duration: latencyMs });
+    return { ok: true, text: output };
+  } catch (err) {
+    const reqId = Math.random().toString(36).slice(2, 10);
+    const latencyMs = Date.now() - start;
+    writeAuditLog({ user, tool: 'run_command', target, command, outcome: 'error', denialReason: err.message, latencyMs, reqId });
+    log({ user: user.email, role: user.role, target, command, allowed: true, error: err.message, reqId, duration: latencyMs });
+    return { ok: false, text: `Query failed (ref: ${reqId}). Please try rephrasing or contact accounts@myfrido.com.` };
+  }
+}
+
 function createMcpServer(user) {
-  const server = new McpServer({
-    name: 'frido-data-connector',
-    version: '1.0.0',
-  });
+  const server = new McpServer({ name: 'frido-data-connector', version: '1.0.0' });
 
   server.resource(
     'instructions',
@@ -48,55 +90,14 @@ function createMcpServer(user) {
 
   server.tool(
     'run_command',
-    `Run a read-only command against Frido live data. Use for ANY Frido business question — stock, revenue, returns, logistics, courier, ads, or any metric.
-- target=bigquery → SQL query against BigQuery tables
-- target=supabase → SQL query against Supabase tables
-- target=repo → cat/ls/head/grep to read dashboard formula code from GitHub`,
+    TOOL_DESCRIPTION,
     {
       command: z.string().describe('The SQL query or file command to run'),
       target: z.enum(['bigquery', 'supabase', 'repo']).describe('bigquery = sales/logistics/ads data, supabase = inventory data, repo = dashboard formula code on GitHub'),
     },
     async ({ command, target }) => {
-      const start = Date.now();
-
-      // Phase 3: role-based authorization
-      const authzResult = authorizeToolCall(user, 'run_command', target);
-      if (!authzResult.ok) {
-        writeAuditLog({ user, tool: 'run_command', target, command, outcome: 'denied', denialReason: authzResult.message, latencyMs: Date.now() - start });
-        log({ user: user.email, role: user.role, target, command, allowed: false, reason: authzResult.message, duration: Date.now() - start });
-        return { content: [{ type: 'text', text: authzResult.message }] };
-      }
-
-      // Phase 4: SQL safety wall
-      const allowed = isAllowed(command, target);
-      if (!allowed) {
-        const reason = blockReason(command, target);
-        writeAuditLog({ user, tool: 'run_command', target, command, outcome: 'denied', denialReason: reason, latencyMs: Date.now() - start });
-        log({ user: user.email, role: user.role, target, command, allowed: false, reason, duration: Date.now() - start });
-        return { content: [{ type: 'text', text: `Not permitted: ${reason}` }] };
-      }
-
-      try {
-        let result;
-        if (target === 'bigquery') result = await runBigQuery(command);
-        else if (target === 'supabase') result = await runSupabase(command);
-        else result = await runRepo(command);
-
-        const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-        const truncated = text.length > 50000;
-        const output = truncated ? text.slice(0, 50000) + '\n\n[truncated: true]' : text;
-        const latencyMs = Date.now() - start;
-
-        writeAuditLog({ user, tool: 'run_command', target, command, outcome: 'ok', rowsReturned: text.split('\n').length, latencyMs });
-        log({ user: user.email, role: user.role, target, command, allowed: true, resultSize: text.length, truncated, duration: latencyMs });
-        return { content: [{ type: 'text', text: output }] };
-      } catch (err) {
-        const reqId = Math.random().toString(36).slice(2, 10);
-        const latencyMs = Date.now() - start;
-        writeAuditLog({ user, tool: 'run_command', target, command, outcome: 'error', denialReason: err.message, latencyMs, reqId });
-        log({ user: user.email, role: user.role, target, command, allowed: true, error: err.message, reqId, duration: latencyMs });
-        return { content: [{ type: 'text', text: `Query failed (ref: ${reqId}). Please try rephrasing or contact accounts@myfrido.com.` }] };
-      }
+      const result = await executeTool(user, command, target);
+      return { content: [{ type: 'text', text: result.text }] };
     }
   );
 
@@ -106,7 +107,6 @@ function createMcpServer(user) {
 const PORT = process.env.PORT || 8080;
 
 const httpServer = http.createServer(async (req, res) => {
-  // Security headers on every response
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
@@ -118,35 +118,33 @@ const httpServer = http.createServer(async (req, res) => {
   }
 
   if (req.url === '/mcp') {
-    // Phase 1: validate Azure AD token on every MCP request
-    const authResult = await validateRequest(req).catch(err => ({
+    const authResult = await validateRequest(req).catch(() => ({
       ok: false, status: 500, message: 'Auth check failed. Try again later.'
     }));
-
     if (!authResult.ok) {
       res.writeHead(authResult.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: authResult.message }));
       return;
     }
 
-    const user = authResult.user;
-
-    // Stateless mode — new server+transport per request
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    });
-    const server = createMcpServer(user);
-
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    const server = createMcpServer(authResult.user);
     res.on('close', () => { server.close().catch(() => {}); });
-
     await server.connect(transport);
     await transport.handleRequest(req, res, await getBody(req));
     return;
   }
 
-  // /chat — dashboard Ask Frido endpoint
+  if (req.method === 'OPTIONS' && req.url === '/chat') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/chat') {
-    // CORS for dashboard origin
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
 
@@ -174,43 +172,35 @@ const httpServer = http.createServer(async (req, res) => {
       return;
     }
 
-    const user = authResult.user;
-    const anthropic = new Anthropic({ apiKey });
-
-    // Detect complex queries that need Opus + extended thinking
-    const lastUserMsg = messages[messages.length - 1]?.text || messages[messages.length - 1]?.content || '';
-    const isComplex = /compar|breakdown|analys|trend|p&l|profit|loss|why|explain|forecast|correlat|multi|across|vs\b|versus|deep/i.test(lastUserMsg);
-    const model = isComplex ? 'claude-opus-4-7' : 'claude-sonnet-4-6';
-
-    const tools = [
-      {
-        name: 'run_command',
-        description: `Run a read-only command against Frido live data. Use for ANY Frido business question — stock, revenue, returns, logistics, courier, ads, or any metric.
-- target=bigquery → SQL query against BigQuery tables
-- target=supabase → SQL query against Supabase tables
-- target=repo → cat/ls/head/grep to read dashboard formula code from GitHub`,
-        input_schema: {
-          type: 'object',
-          properties: {
-            command: { type: 'string', description: 'SQL query or shell command to run' },
-            target: { type: 'string', enum: ['bigquery', 'supabase', 'repo'], description: 'Data source to query' },
-          },
-          required: ['command', 'target'],
-        },
-      },
-    ];
-
-    // Check monthly budget before calling Claude
     const budget = checkBudget();
     if (!budget.ok) {
-      await sendLimitEmail(user);
+      await sendLimitEmail(authResult.user);
       res.writeHead(429, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: `Monthly AI budget of $300 has been reached. Frido Pulse will resume next month. Contact data.team@myfrido.com to raise the limit.` }));
+      res.end(JSON.stringify({ error: 'Monthly AI budget of $300 has been reached. Frido Pulse will resume next month. Contact data.team@myfrido.com to raise the limit.' }));
       return;
     }
 
+    const user = authResult.user;
+    const anthropic = new Anthropic({ apiKey });
+
+    const lastUserMsg = messages[messages.length - 1]?.content ?? messages[messages.length - 1]?.text ?? '';
+    const isComplex = /compar|breakdown|analys|trend|p&l|profit|loss|why|explain|forecast|correlat|multi|across|vs\b|versus|deep/i.test(lastUserMsg);
+    const model = isComplex ? 'claude-opus-4-7' : 'claude-sonnet-4-6';
+
+    const tools = [{
+      name: 'run_command',
+      description: TOOL_DESCRIPTION,
+      input_schema: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'SQL query or shell command to run' },
+          target: { type: 'string', enum: ['bigquery', 'supabase', 'repo'], description: 'Data source to query' },
+        },
+        required: ['command', 'target'],
+      },
+    }];
+
     try {
-      // Agentic loop — keep calling Claude until no more tool calls
       let loopMessages = messages.map(m => ({ role: m.role, content: m.content ?? m.text }));
       let finalText = '';
       let usedSql = null;
@@ -227,15 +217,12 @@ const httpServer = http.createServer(async (req, res) => {
           tools,
           messages: loopMessages,
         };
-        // Extended thinking only on Opus
         if (isComplex) reqParams.thinking = { type: 'enabled', budget_tokens: 10000 };
         const response = await anthropic.messages.create(reqParams);
 
-        // Accumulate token usage across all loop iterations
         totalInputTokens += response.usage?.input_tokens || 0;
         totalOutputTokens += response.usage?.output_tokens || 0;
 
-        // Collect any text from this turn
         for (const block of response.content) {
           if (block.type === 'text') finalText = block.text;
           if (block.type === 'tool_use' && block.input?.command) usedSql = block.input.command;
@@ -243,38 +230,13 @@ const httpServer = http.createServer(async (req, res) => {
 
         if (response.stop_reason !== 'tool_use') break;
 
-        // Execute all tool calls
+        // Execute tool calls using the same executeTool() as MCP
         const toolResults = [];
         for (const block of response.content) {
           if (block.type !== 'tool_use') continue;
           const { command, target } = block.input;
-
-          const authzResult = authorizeToolCall(user, 'run_command', target);
-          if (!authzResult.ok) {
-            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: authzResult.message });
-            continue;
-          }
-          const allowed = isAllowed(command, target);
-          if (!allowed) {
-            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: `Not permitted: ${blockReason(command, target)}` });
-            continue;
-          }
-
-          try {
-            let result;
-            if (target === 'bigquery') result = await runBigQuery(command);
-            else if (target === 'supabase') result = await runSupabase(command);
-            else result = await runRepo(command);
-
-            const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-            const output = text.length > 50000 ? text.slice(0, 50000) + '\n\n[truncated]' : text;
-            writeAuditLog({ user, tool: 'run_command', target, command, outcome: 'ok', latencyMs: 0 });
-            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: output });
-          } catch (err) {
-            const reqId = Math.random().toString(36).slice(2, 10);
-            writeAuditLog({ user, tool: 'run_command', target, command, outcome: 'error', denialReason: err.message, latencyMs: 0, reqId });
-            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: `Query failed (ref: ${reqId})` });
-          }
+          const result = await executeTool(user, command, target);
+          toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result.text });
         }
 
         loopMessages = [
@@ -284,7 +246,6 @@ const httpServer = http.createServer(async (req, res) => {
         ];
       }
 
-      // Track total cost across all loop iterations
       await trackUsage({ model, inputTokens: totalInputTokens, outputTokens: totalOutputTokens, user }).catch(() => {});
 
       const stats = getStats();
@@ -295,16 +256,6 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Chat failed. Please try again.' }));
     }
-    return;
-  }
-
-  // /chat preflight
-  if (req.method === 'OPTIONS' && req.url === '/chat') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
-    res.writeHead(204);
-    res.end();
     return;
   }
 
