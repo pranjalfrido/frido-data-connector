@@ -16,7 +16,7 @@
 | Table | Use for |
 |---|---|
 | `production.fact_all_platform_sales_report` | All sales, revenue, returns, RTO, CIR, orders, units |
-| `production.Clickpost_Shipment_Tracking_Report` | Logistics: delivery rate, RTO%, TAT, courier performance |
+| `production.Clickpost_Shipment_Tracking_Report` | Logistics: delivery rate, RTO%, TAT, courier performance, **shipment cost, delivery cost, freight cost, cost per shipment** — this is the ONLY table for any courier cost question |
 | `production.Aggregated_uniware_sales_report` | Inward/receiving, warehouse movements |
 | `production.pincode_city_master` | State, city, region, tier mapping by pincode |
 | `sharepoint_to_gcp.Frido_Item_Master__frido_item_sku_master` | Product master: category, GST rate, weight, dimensions |
