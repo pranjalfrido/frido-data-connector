@@ -98,6 +98,7 @@ Options must be real values found while exploring — never invented.
 - All dates/times in IST.
 
 ## Known gotchas
+- **CRITICAL — dates**: ALWAYS use `CURRENT_DATE()` in BigQuery for today's date. NEVER hardcode a year like 2024 or 2025 — the current year is determined by `CURRENT_DATE()`. "This month" = `DATE_TRUNC(CURRENT_DATE(), MONTH)` to `CURRENT_DATE()`. "Last 30 days" = `DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)` to `CURRENT_DATE()`.
 - Timezone: all date columns are UTC in BQ; convert to IST (+5:30) for display
 - `fact_all_platform_sales_report` is a dbt model — always the freshest source for sales
 - Inventory data is hourly-synced to Supabase; for real-time use `inv_snapshot`
