@@ -184,7 +184,7 @@ const httpServer = http.createServer(async (req, res) => {
     const anthropic = new Anthropic({ apiKey });
 
     const lastUserMsg = messages[messages.length - 1]?.content ?? messages[messages.length - 1]?.text ?? '';
-    const isComplex = /compar|breakdown|analys|trend|p&l|profit|loss|why|explain|forecast|correlat|multi|across|vs\b|versus|deep/i.test(lastUserMsg);
+    const isComplex = /compar|breakdown|analys|trend|p&l|profit|loss|why|explain|forecast|correlat|multi|across|vs\b|versus|deep|inventor|planning|plan|oos|out.of.stock|lead.time|reorder|avg.daily|average.daily|stuck|stock.out|stockout/i.test(lastUserMsg);
     const model = isComplex ? 'claude-opus-4-7' : 'claude-sonnet-4-6';
 
     const tools = [{
@@ -208,17 +208,17 @@ const httpServer = http.createServer(async (req, res) => {
       let totalInputTokens = 0;
       let totalOutputTokens = 0;
 
-      while (iterations < 8) {
+      while (iterations < 12) {
         iterations++;
         const reqParams = {
           model,
-          max_tokens: isComplex ? 16000 : 4096,
+          max_tokens: isComplex ? 16000 : 8192,
           system: buildSystemPrompt(),
           tools,
           tool_choice: iterations === 1 ? { type: 'any' } : { type: 'auto' },
           messages: loopMessages,
         };
-        if (isComplex) reqParams.thinking = { type: 'enabled', budget_tokens: 10000 };
+        if (isComplex && model === 'claude-opus-4-7') reqParams.thinking = { type: 'adaptive' };
         const response = await anthropic.messages.create(reqParams);
 
         totalInputTokens += response.usage?.input_tokens || 0;
@@ -237,7 +237,12 @@ const httpServer = http.createServer(async (req, res) => {
           if (block.type !== 'tool_use') continue;
           const { command, target } = block.input;
           const result = await executeTool(user, command, target);
-          toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result.text });
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: result.text,
+            is_error: !result.ok,
+          });
         }
 
         loopMessages = [
@@ -247,7 +252,32 @@ const httpServer = http.createServer(async (req, res) => {
         ];
       }
 
+      // If loop exhausted all iterations still in tool_use, force a final text response
+      if (!finalText && loopMessages.length > messages.length) {
+        const finalResponse = await anthropic.messages.create({
+          model,
+          max_tokens: 4096,
+          system: buildSystemPrompt(),
+          tools,
+          tool_choice: { type: 'none' },
+          messages: loopMessages,
+        }).catch(() => null);
+        if (finalResponse) {
+          totalInputTokens += finalResponse.usage?.input_tokens || 0;
+          totalOutputTokens += finalResponse.usage?.output_tokens || 0;
+          for (const block of finalResponse.content) {
+            if (block.type === 'text') finalText = block.text;
+          }
+        }
+      }
+
       await trackUsage({ model, inputTokens: totalInputTokens, outputTokens: totalOutputTokens, user }).catch(() => {});
+
+      if (!finalText) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'No answer could be generated — the data query failed. Please try again or contact data.team@myfrido.com.' }));
+        return;
+      }
 
       const stats = getStats();
       res.writeHead(200, { 'Content-Type': 'application/json' });
