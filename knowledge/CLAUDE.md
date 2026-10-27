@@ -42,7 +42,7 @@ Always read `api/_bq.js` for the exact formula before writing SQL for these.
 | Net Revenue | `api/_bq.js` → `computeNetRevenueMeasures()` | Gross × Retained Share |
 | RTO % | `api/_bq.js` | Order_Status = 'RTO', divided by Gross Inc GST |
 | CIR % | `api/_bq.js` | Order_Status = 'CIR', divided by Gross Inc GST |
-| Returns % | `api/_bq.js` | RTO + CIR + Return + prepaid cancel / Gross Inc GST |
+| Returns % | locked formula below | Mature window (today-44d to today-14d), NOT selected date range — see "EXACT SQL for SKU return %" section |
 | Delivery Rate | `api/logistics.js` | Delivered / Total shipments |
 | DOI | locked formula below | Total inventory / Avg daily sale — use the "EXACT query for total inventory" section, do NOT read _inventory_shared.js |
 | Channel mapping | `api/_bq.js` → `buildQuery()` | See channel groups below |
@@ -163,6 +163,77 @@ Examples:
 - User asks "sales on 2025-03-01" → no rows for that date → reply "No sales data found for that date." Done.
 
 Never burn multiple tool calls trying to find the data elsewhere. Data not in the expected table = data not available.
+
+## EXACT SQL for SKU return % — use this, never invent
+
+Return % for SKUs uses a **mature window anchored to today**, NOT the user's selected date range. Recent orders haven't had time to settle their RTO/CIR/Cancelled status yet, so using the current period gives artificially low return rates.
+
+**Window**: `today - 44 days` to `today - 14 days` (30-day window, always fixed to today)
+- `rollingEnd = DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)`
+- `rollingStart = DATE_SUB(rollingEnd, INTERVAL 29 DAY)` (= today - 43d, effectively today-44d to today-14d)
+
+**Formula**: `(rto_rev + cir_rev + return_rev + prepaid_cancel_rev) / gross_inc_gst`
+- Same as `computeNetRevenueMeasures().overallReturnPct` → `totalReturnPct`
+- prepaid_cancel_rev = cancel_rev - cod_cancel_rev (prepaid cancellations only, NOT COD)
+
+**Minimum volume floor**: 30 units in the mature window. If a SKU has < 30 units, fall back to category rate; if category also < 30 units, use the all-channel rate.
+
+```sql
+-- SKU return % (mature window) — top products by return rate
+WITH mature AS (
+  SELECT
+    masterskucode AS sku,
+    Category AS category,
+    SUM(ItemQty) AS units,
+    SUM(SellingPrice_Inc_GST) AS gross_inc_gst,
+    SUM(CASE WHEN Order_Status = 'CIR'       THEN SellingPrice_Inc_GST ELSE 0 END) AS cir_rev,
+    SUM(CASE WHEN Order_Status = 'RTO'       THEN SellingPrice_Inc_GST ELSE 0 END) AS rto_rev,
+    SUM(CASE WHEN Order_Status = 'Return'    THEN SellingPrice_Inc_GST ELSE 0 END) AS return_rev,
+    SUM(CASE WHEN Order_Status = 'Cancelled' THEN SellingPrice_Inc_GST ELSE 0 END) AS cancel_rev,
+    SUM(CASE WHEN Order_Status = 'Cancelled' AND payment_type != 'COD'
+                                             THEN SellingPrice_Inc_GST ELSE 0 END) AS prepaid_cancel_rev
+  FROM `frido-429506.production.fact_all_platform_sales_report`
+  WHERE OrderDate BETWEEN DATE_SUB(DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY), INTERVAL 29 DAY)
+                      AND DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
+    AND NOT (OrderId LIKE '%_EX%')
+    AND NOT (Channel = 'offline_sales' AND COALESCE(Order_Status, '') = 'Credit Note')
+    AND NOT (Channel = 'Amazon' AND COALESCE(Order_Status, '') = 'RTV (Return to vendor)')
+    AND masterskucode IS NOT NULL AND TRIM(masterskucode) != ''
+  GROUP BY sku, category
+),
+cat_totals AS (
+  SELECT category,
+    SUM(units) AS units,
+    SAFE_DIVIDE(SUM(rto_rev + cir_rev + return_rev + prepaid_cancel_rev), SUM(gross_inc_gst)) AS cat_return_pct
+  FROM mature GROUP BY category
+),
+all_total AS (
+  SELECT SAFE_DIVIDE(SUM(rto_rev + cir_rev + return_rev + prepaid_cancel_rev), SUM(gross_inc_gst)) AS all_return_pct,
+         SUM(units) AS units FROM mature
+)
+SELECT
+  m.sku,
+  m.category,
+  m.units,
+  -- Fall back: SKU rate if >= 30 units, else category rate, else all-channel rate
+  CASE
+    WHEN m.units >= 30
+      THEN ROUND(SAFE_DIVIDE(m.rto_rev + m.cir_rev + m.return_rev + m.prepaid_cancel_rev, m.gross_inc_gst) * 100, 2)
+    WHEN c.units >= 30
+      THEN ROUND(c.cat_return_pct * 100, 2)
+    ELSE ROUND((SELECT all_return_pct FROM all_total) * 100, 2)
+  END AS return_pct
+FROM mature m
+JOIN cat_totals c USING (category)
+ORDER BY return_pct DESC
+LIMIT 10
+```
+
+**Critical rules:**
+- Window is ALWAYS `today - 44d to today - 14d`, regardless of what date range the user asked about. Never use the user's requested start/end for return rate.
+- Flipkart uses a different formula: `(Return + RTO revenue) / total_rev` only — NOT CIR or Cancel.
+- Myntra uses `FulfilmentStatus` for cancellations, not `Order_Status`.
+- Never use `Order_Status = 'Return'` alone — that misses RTO and CIR which are the bigger buckets.
 
 ## When to ask vs assume
 Ask ONLY if the ambiguity would change the number materially:
