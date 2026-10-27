@@ -294,11 +294,13 @@ WHERE f.fcs_status_for_invt = 'Live'
 
 **Critical rules — never break these:**
 - `fcs_status_for_invt = 'Live'` is MANDATORY. Omitting it inflates total by ~7x (includes WareIQ, Zippee, old Vadgaon, FBA, factory facilities).
-- Pack-qty scaling (`× PO##`) applies ONLY to RAW SKUs (item_sku_code contains 'RAW' or standalone '-RW'/'-RWA'). Never apply it to all SKUs.
+- **For warehouse-wise breakdown**: also filter `facility_type = 'Regular'` — this matches the dashboard's "Regular" tab (8 main WHs). Without it, EBO stores (~3K units), Dark Stores, and Frido stores (~15K units) are included and the total will be ~9.3L instead of the correct ~8.69L.
+- Pack-qty scaling (`× PO##`) applies ONLY to RAW SKUs — SKU contains 'RAW', standalone '-RW'/'-RWA', OR facility is `myfrido-Vadgaon_ITEM` (always raw). Never apply pack-qty to RTD SKUs.
 - `Vadgaon_OPS` and `Frido_Sudhawadi` have pre-computed RTD/Raw/RawBlocked columns — use those as-is, do NOT apply pack-qty logic.
 - Exclude pseudo-SKUs: `COUP` and `DFA` in item_sku_code.
 - The 8 Live Regular WH locations are: PNQ (Vadgaon_OPS, Frido_Sudhawadi), GGN (Hexalog_GGN2), BLR (myfrido-BLR_Hexalog), MUM (Beyond_Mum), KOL (Aaj_Kol_Item), HYD (Losung_Hyderabad), CHN (Losung_Chennai).
 - "Unmapped" facility rows (facility not in facility_master) = not Live, exclude them.
+- **For warehouse-wise inventory question**, add `GROUP BY i.facility` to the locked SQL above and also join `facility_master` to get the location name.
 
 ## Default behaviors (critical — wrong answers come from ignoring these)
 
