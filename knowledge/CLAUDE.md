@@ -47,17 +47,22 @@ Always read `api/_bq.js` for the exact formula before writing SQL for these.
 | DOI | `api/_inventory_shared.js` → `stockStatus()` | Total inventory / Avg daily sale |
 | Channel mapping | `api/_bq.js` → `buildQuery()` | See channel groups below |
 
-## CRITICAL: Channel revenue query — exact filters to use
-When showing revenue by channel, use ONLY these exclusions — nothing else:
+## EXACT SQL template for revenue by channel — use this, never invent filters
 ```sql
-WHERE Order_Type != 'Credit Note'
-  AND Order_Type != 'RTV'
-  AND OrderId NOT LIKE '%\_EX%'
-  AND NOT (Channel = 'Shopify' AND Channel_Group = 'D2C' AND Order_Status = 'Return')
+SELECT Channel, 
+  SUM(SellingPrice_Inc_GST) AS gross_revenue_inc_gst,
+  SUM(SellingPrice_Exc_GST) AS gross_revenue_exc_gst,
+  COUNT(DISTINCT OrderId) AS orders,
+  SUM(ItemQty) AS units
+FROM `frido-429506.production.fact_all_platform_sales_report`
+WHERE OrderDate BETWEEN '${start}' AND '${end}'
+  AND NOT (OrderId LIKE '%_EX%')
+GROUP BY Channel
+ORDER BY gross_revenue_inc_gst DESC
 ```
-DO NOT add any filter on Channel name. All 12 channels must appear: Shopify, Amazon, Flipkart, Myntra, Blinkit, Zepto, Instamart, CRED, Firstcry, Retail, offline_sales, International.
-
-The Shopify International exclusion is: rows where Channel='Shopify' AND Channel_Group != 'D2C' — exclude those. All other channels: include everything.
+- Only 1 filter needed: exclude `_EX` orders. Nothing else.
+- Do NOT add RTV filters, Credit Note filters, Order_Type filters, payment_type filters, or any channel-level exclusions
+- All 12 channels appear naturally: Shopify, Amazon, offline_sales, Retail, Flipkart, Blinkit, Myntra, Instamart, Zepto, CRED, Firstcry, International
 
 ## Default behaviors (critical — wrong answers come from ignoring these)
 
