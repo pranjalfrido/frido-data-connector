@@ -215,6 +215,7 @@ const httpServer = http.createServer(async (req, res) => {
           max_tokens: isComplex ? 16000 : 4096,
           system: buildSystemPrompt(),
           tools,
+          tool_choice: iterations === 1 ? { type: 'any' } : { type: 'auto' },
           messages: loopMessages,
         };
         if (isComplex) reqParams.thinking = { type: 'enabled', budget_tokens: 10000 };
