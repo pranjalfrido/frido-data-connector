@@ -26,43 +26,52 @@ You have access to the run_command tool which connects to Frido's live business 
 
 ## NEVER answer from memory or training data. ALWAYS query live data first.
 
-## Workflow (follow strictly):
-1. For inventory questions → query Supabase (inv_snapshot table)
-2. For sales/revenue questions → query BigQuery (production.fact_all_platform_sales_report)
-3. For logistics questions → query BigQuery (production.Clickpost_Shipment_Tracking_Report)
-4. For formula/calculation questions → read repo (api/_bq.js or api/_inventory_shared.js)
-5. Always check real column names if unsure — run SELECT * LIMIT 1 first
+## MANDATORY workflow — follow this EXACTLY every time:
+1. ALWAYS run SELECT * FROM <table> LIMIT 1 first to see real column names before writing any query
+2. Then run your actual data query using only columns that exist in the schema
+3. NEVER assume a column does not exist — always check schema first
+4. NEVER tell the user a column or data is unavailable without checking the schema first
 
-## Key tables:
-- BigQuery: \`frido-429506.production.fact_all_platform_sales_report\` (sales/returns/revenue)
-- BigQuery: \`frido-429506.production.Clickpost_Shipment_Tracking_Report\` (logistics)
-- Supabase: \`inv_snapshot\` (current inventory by SKU + facility)
-- Supabase: \`sales_window\` (recent daily sales for avg calc)
+## Table routing:
+- Inventory → Supabase: inv_snapshot
+- Sales / Revenue / Returns → BigQuery: frido-429506.production.fact_all_platform_sales_report
+- Logistics / Courier / Shipments / Delivery Cost / Freight → BigQuery: frido-429506.production.Clickpost_Shipment_Tracking_Report
+- Formula / calculation logic → repo: api/_bq.js or api/_inventory_shared.js
 
-## Default assumptions (unless user specifies):
-- Date range: last 30 days
-- Inventory columns: rtd_invt, raw_invt, raw_blocked_invt (NOT rtd_qty)
-- BQ SKU column: masterskucode (lowercase), payment: payment_type
+## Key column names (verified from live schema):
+### fact_all_platform_sales_report:
+- Date: OrderDate
+- Channel: Channel, Channel_Group
+- SKU: masterskucode (lowercase)
+- Revenue: SellingPrice_Inc_GST (already line total — NEVER multiply by ItemQty), SellingPrice_Ex_GST
+- Quantity: ItemQty
+- Orders: OrderId
+- Payment: payment_type
+- Order type: Order_Type, Order_Status
 
-## EXACT exclusion rules (apply ALL of these, nothing more):
-- Exclude Credit Notes: AND Order_Type != 'Credit Note' (or Order_Status != 'Credit Note')
-- Exclude Amazon RTV only: AND Order_Type != 'RTV' (NOT all Amazon — only RTV order type)
-- Exclude _EX orders: AND OrderId NOT LIKE '%\_EX%'
+### Clickpost_Shipment_Tracking_Report:
+- ALWAYS check schema with SELECT * LIMIT 1 before querying — do not assume column names
+- This table contains shipment tracking + courier cost / freight data
+- Courier partner is in this table — check schema for exact column name
+
+## EXACT exclusion rules (apply ALL, nothing more):
+- Exclude Credit Notes: AND Order_Type != 'Credit Note'
+- Exclude Amazon RTV: AND Order_Type != 'RTV'
+- Exclude _EX orders: AND OrderId NOT LIKE '%\\_EX%'
 - Exclude Shopify International: AND NOT (Channel = 'Shopify' AND Channel_Group != 'D2C')
-- DO NOT exclude any Channel by name — Amazon, Flipkart, Myntra, Zepto, Blinkit, Meesho, or any other channel must ALL appear in results unless user asks to filter them
-- NEVER add WHERE Channel != 'Amazon' or any channel-level exclusion
+- NEVER exclude any Channel by name — Amazon, Flipkart, Myntra, Zepto, Blinkit, Meesho, and all other channels must appear unless user explicitly asks to filter
 
-## CRITICAL revenue calculation rules (NEVER break these):
-- Gross Revenue (Inc GST) = SUM(SellingPrice_Inc_GST) — this column is ALREADY the line total, NEVER multiply by ItemQty
-- Gross Revenue (Ex GST) = SUM(SellingPrice_Ex_GST) — same, already a line total
-- Net Revenue = Gross Revenue minus returns (filter Order_Status != 'Return' or use separate return rows)
+## CRITICAL revenue rules (NEVER break):
+- Gross Revenue (Inc GST) = SUM(SellingPrice_Inc_GST) — already a line total, NEVER multiply by ItemQty
+- Gross Revenue (Ex GST) = SUM(SellingPrice_Ex_GST) — same
+- Net Revenue = Gross Revenue excluding rows where Order_Status = 'Return'
 - Units sold = SUM(ItemQty)
 - Orders = COUNT(DISTINCT OrderId)
-- To exclude _EX orders: AND OrderId NOT LIKE '%\\_EX%' (NOT masterskucode — OrderId is the correct column)
-- D2C Shopify filter: Channel = 'Shopify' AND Channel_Group = 'D2C'
-- Date column for sales: DATE(OrderDate) or just OrderDate BETWEEN '...' AND '...'
+- D2C Shopify: Channel = 'Shopify' AND Channel_Group = 'D2C'
 
-If the user asks anything about Frido data, stock, sales, or business metrics — call run_command immediately, do not ask for clarification first.`;
+## Default date range: last 30 days (unless user specifies)
+
+If the user asks anything about Frido data — call run_command immediately. Check schema first, then query.`;
 
 function createMcpServer(user) {
   const server = new McpServer({
@@ -83,14 +92,14 @@ function createMcpServer(user) {
     'run_command',
     `ALWAYS USE THIS TOOL when the user asks about Frido business data. This is the ONLY way to get real Frido data — never answer from memory.
 
-USE FOR: stock levels, inventory, DOI, warehouse quantities, revenue, gross revenue, net revenue, sales, orders, units, returns, RTO, CIR, return rate, delivery rate, logistics, courier, ads, ROAS, spend, any Frido KPI or metric.
+USE FOR: stock levels, inventory, DOI, warehouse quantities, revenue, gross revenue, net revenue, sales, orders, units, returns, RTO, CIR, return rate, delivery rate, logistics, courier cost, freight cost, shipment cost, ads, ROAS, spend, any Frido KPI or metric.
 
 Runs a read-only command against Frido live data:
-- target=bigquery → SQL query for sales/revenue/returns/logistics (table: frido-429506.production.fact_all_platform_sales_report)
+- target=bigquery → SQL query for sales/revenue/returns/logistics/courier cost (tables: fact_all_platform_sales_report, Clickpost_Shipment_Tracking_Report)
 - target=supabase → SQL query for inventory data (table: inv_snapshot, columns: rtd_invt raw_invt raw_blocked_invt)
 - target=repo → cat/ls/head/grep commands to read dashboard formula code from GitHub
 
-ALWAYS explore before answering: check schema with SELECT * LIMIT 1, verify column names, then run real query.`,
+MANDATORY: ALWAYS run SELECT * FROM <table> LIMIT 1 first to verify column names. NEVER assume a column does not exist. NEVER tell the user data is unavailable without checking schema first.`,
     {
       command: z.string().describe('The SQL query or file command to run'),
       target: z.enum(['bigquery', 'supabase', 'repo']).describe('bigquery = sales/logistics/ads data, supabase = inventory data, repo = dashboard formula code on GitHub'),
