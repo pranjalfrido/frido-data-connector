@@ -44,6 +44,7 @@ All percentage metrics below are **REVENUE-BASED** (÷ Gross Revenue Inc GST), n
 | CIR % | locked formula below | **REVENUE-BASED** — CIR Revenue ÷ Gross Revenue (Inc GST) × 100. NEVER order-count-based. See "EXACT formula for CIR %" section. |
 | Returns % | locked formula below | Mature window (today-44d to today-14d), NOT selected date range — see "EXACT SQL for SKU return %" section |
 | Delivery Rate | locked formula below | Delivered shipments ÷ Total shipments (Clickpost) — see "EXACT formula for Delivery Rate" |
+| Stuck Shipments | locked formula below | Forward only, no RTO-% statuses, guard pre-2020 timestamps — see "EXACT formula for Stuck Shipments" |
 | DOI | locked formula below | Total inventory / Avg daily sale — use the "EXACT query for total inventory" section, do NOT read _inventory_shared.js |
 | Channel mapping | locked below | See channel groups section |
 
@@ -171,6 +172,61 @@ WHERE DATE(created_at) BETWEEN '${start}' AND '${end}'
 - Always forward shipments only unless user explicitly asks for reverse.
 - Delivered definition: `clickpost_unified_status = 'Delivered'` OR (`= 'NoStatusExist'` AND `latest_remark LIKE '%delivered%'`).
 - Add `GROUP BY courier_partner_name` for courier-level breakdown.
+
+## EXACT formula for Stuck Shipments — use this, never invent
+
+"Stuck" = forward shipment not in a terminal status, with no movement (latest_timestamp not updated) for 3+ days.
+
+**Two critical rules confirmed against live data:**
+1. Exclude ALL `RTO-%` statuses — RTO orders are actively being returned, not stuck. Only excluding `RTO-Delivered` (the common mistake) overcounts by ~182 shipments.
+2. Guard `DATE(latest_timestamp) > '2020-01-01'` — 74 rows have garbage epoch-style timestamps that falsely match any "stuck > N days" filter without this guard.
+
+```sql
+-- Stuck shipments: no movement for 3+ days, by staleness bucket
+SELECT
+  CASE
+    WHEN DATE_DIFF(CURRENT_DATE(), DATE(latest_timestamp), DAY) BETWEEN 3 AND 7  THEN '4–7 days no update'
+    WHEN DATE_DIFF(CURRENT_DATE(), DATE(latest_timestamp), DAY) BETWEEN 8 AND 14 THEN '8–14 days no update'
+    ELSE '14+ days no update'
+  END AS staleness_bucket,
+  COUNT(*) AS stuck_shipments
+FROM `frido-429506.production.Clickpost_Shipment_Tracking_Report`
+WHERE shipment_type = 'Forward'
+  AND clickpost_unified_status NOT IN ('Delivered', 'Cancelled', 'Lost', 'Damaged', 'ReShippedOnNewWaybill')
+  AND clickpost_unified_status NOT LIKE 'RTO-%'
+  AND clickpost_unified_status != 'NoStatusExist'
+  AND latest_timestamp IS NOT NULL
+  AND DATE(latest_timestamp) > '2020-01-01'
+  AND DATE(latest_timestamp) <= DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY)
+  AND DATE(created_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+GROUP BY staleness_bucket
+ORDER BY MIN(DATE_DIFF(CURRENT_DATE(), DATE(latest_timestamp), DAY))
+```
+
+For courier breakdown, replace the SELECT/GROUP BY:
+```sql
+SELECT
+  courier_partner,
+  COUNT(*) AS stuck_shipments
+FROM `frido-429506.production.Clickpost_Shipment_Tracking_Report`
+WHERE shipment_type = 'Forward'
+  AND clickpost_unified_status NOT IN ('Delivered', 'Cancelled', 'Lost', 'Damaged', 'ReShippedOnNewWaybill')
+  AND clickpost_unified_status NOT LIKE 'RTO-%'
+  AND clickpost_unified_status != 'NoStatusExist'
+  AND latest_timestamp IS NOT NULL
+  AND DATE(latest_timestamp) > '2020-01-01'
+  AND DATE(latest_timestamp) <= DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY)
+  AND DATE(created_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+GROUP BY courier_partner
+ORDER BY stuck_shipments DESC
+```
+
+**Wrong patterns — never use:**
+```
+❌ Only excluding 'RTO-Delivered' from NOT IN — misses RTO-InTransit, RTO-Marked etc. (+182 overcounts)
+❌ No DATE(latest_timestamp) > '2020-01-01' guard — ghost epoch rows inflate count (+74 overcounts)
+❌ shipment_type = 'forward' (lowercase) — use 'Forward' (capital F), that's the actual value in the table
+```
 
 ## EXACT SQL template for SKU-level revenue — use this, never invent
 ```sql
