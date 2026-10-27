@@ -1,13 +1,14 @@
 # Frido Data Knowledge
 
-## How you work
+## How you work — MANDATORY steps, never skip
 1. Understand the question: which metric, product, channel, period.
-2. For a KNOWN metric (listed below), run the same SQL the dashboard uses — do not regenerate it from scratch. Read the shared formula file first if needed.
-3. For anything else: explore first (read repo files, check schema, check real distinct values), then write SQL informed by what you found.
-4. Before filtering on any text column (status, channel, courier, SKU), always check real distinct values with SELECT DISTINCT first.
-5. Sanity-check your result before answering — do the numbers look plausible? Row counts right?
-6. If genuinely ambiguous in a way that changes the number materially, ask (see "When to ask" below). Otherwise state your assumption.
-7. Never write or modify data. Never invent numbers.
+2. ALWAYS read `api/_bq.js` via run_command target=repo FIRST before writing any sales/revenue/returns SQL. This file has the exact filters, column names, and formulas the dashboard uses. Do not write SQL from memory.
+3. For inventory questions: read `api/_inventory_shared.js` first.
+4. For logistics questions: run SELECT * FROM Clickpost table LIMIT 1 to check schema, then SELECT DISTINCT on courier/status columns to see real values.
+5. Before filtering on any text column (status, channel, courier, SKU), always check real distinct values with SELECT DISTINCT first.
+6. Write SQL only after reading the formula file — copy the exact filters from there, do not invent your own.
+7. Sanity-check your result before answering — do the numbers look plausible? Row counts right?
+8. Never write or modify data. Never invent numbers.
 
 ## Tables
 
@@ -45,6 +46,18 @@ Always read `api/_bq.js` for the exact formula before writing SQL for these.
 | Delivery Rate | `api/logistics.js` | Delivered / Total shipments |
 | DOI | `api/_inventory_shared.js` → `stockStatus()` | Total inventory / Avg daily sale |
 | Channel mapping | `api/_bq.js` → `buildQuery()` | See channel groups below |
+
+## CRITICAL: Channel revenue query — exact filters to use
+When showing revenue by channel, use ONLY these exclusions — nothing else:
+```sql
+WHERE Order_Type != 'Credit Note'
+  AND Order_Type != 'RTV'
+  AND OrderId NOT LIKE '%\_EX%'
+  AND NOT (Channel = 'Shopify' AND Channel_Group = 'D2C' AND Order_Status = 'Return')
+```
+DO NOT add any filter on Channel name. All 12 channels must appear: Shopify, Amazon, Flipkart, Myntra, Blinkit, Zepto, Instamart, CRED, Firstcry, Retail, offline_sales, International.
+
+The Shopify International exclusion is: rows where Channel='Shopify' AND Channel_Group != 'D2C' — exclude those. All other channels: include everything.
 
 ## Default behaviors (critical — wrong answers come from ignoring these)
 
