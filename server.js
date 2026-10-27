@@ -41,9 +41,16 @@ You have access to the run_command tool which connects to Frido's live business 
 
 ## Default assumptions (unless user specifies):
 - Date range: last 30 days
-- Exclude: Credit Notes, Amazon RTV, _EX suffix orders, Shopify International
 - Inventory columns: rtd_invt, raw_invt, raw_blocked_invt (NOT rtd_qty)
 - BQ SKU column: masterskucode (lowercase), payment: payment_type
+
+## EXACT exclusion rules (apply ALL of these, nothing more):
+- Exclude Credit Notes: AND Order_Type != 'Credit Note' (or Order_Status != 'Credit Note')
+- Exclude Amazon RTV only: AND Order_Type != 'RTV' (NOT all Amazon — only RTV order type)
+- Exclude _EX orders: AND OrderId NOT LIKE '%\_EX%'
+- Exclude Shopify International: AND NOT (Channel = 'Shopify' AND Channel_Group != 'D2C')
+- DO NOT exclude any Channel by name — Amazon, Flipkart, Myntra, Zepto, Blinkit, Meesho, or any other channel must ALL appear in results unless user asks to filter them
+- NEVER add WHERE Channel != 'Amazon' or any channel-level exclusion
 
 ## CRITICAL revenue calculation rules (NEVER break these):
 - Gross Revenue (Inc GST) = SUM(SellingPrice_Inc_GST) — this column is ALREADY the line total, NEVER multiply by ItemQty
@@ -220,7 +227,8 @@ const httpServer = http.createServer(async (req, res) => {
         description: `ALWAYS USE THIS TOOL when the user asks about Frido business data. Runs a read-only command against Frido live data.
 - target=bigquery → SQL for sales/revenue/returns/logistics
 - target=supabase → SQL for inventory data (inv_snapshot table)
-- target=repo → cat/ls/grep commands to read dashboard formula code`,
+- target=repo → cat/ls/grep commands to read dashboard formula code
+IMPORTANT: Never exclude channels by name. All channels (Amazon, Flipkart, Myntra, Zepto, Blinkit, Meesho, Shopify, Offline, etc.) must appear unless user asks to filter.`,
         input_schema: {
           type: 'object',
           properties: {
