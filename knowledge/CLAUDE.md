@@ -25,10 +25,10 @@
 ### Supabase
 | Table | Use for |
 |---|---|
-| `inv_snapshot` | Current inventory (RTD, Raw, Blocked) by SKU + facility |
+| `inv_snapshot` | Current inventory by SKU + facility — columns: `item_sku_code`, `facility`, `updated` (timestamp), `rtd_invt`, `raw_invt`, `raw_blocked_invt`, `inventory`, `inventory_blocked`. No `snapshot_at` or `updated_at` column. |
 | `sales_window` | Recent sales for avg daily sale calculation |
 | `item_master` | Product master (synced hourly from BigQuery) |
-| `cogs_ledger` | COGS per SKU per month |
+| `cogs_ledger` | COGS per SKU per month — columns: `itemskucode`, `month` (text, format `YYYY-MM`), `cogs` (numeric), `category`, `subcategory`, `is_explicit`. **Note: data may lag 1-2 months; check `SELECT DISTINCT month FROM cogs_ledger ORDER BY month DESC LIMIT 3` before assuming current month is available.** |
 | `facility_master` | Warehouse metadata, FC status, location |
 | `sales_90d` | 90-day aggregates for dead-stock detection |
 
@@ -47,6 +47,23 @@ Always read `api/_bq.js` for the exact formula before writing SQL for these.
 | DOI | `api/_inventory_shared.js` → `stockStatus()` | Total inventory / Avg daily sale |
 | Channel mapping | `api/_bq.js` → `buildQuery()` | See channel groups below |
 
+## EXACT SQL template for SKU-level revenue — use this, never invent
+```sql
+SELECT masterskucode,
+  SUM(SellingPrice_Inc_GST) AS gross_revenue_inc_gst,
+  SUM(SellingPrice_Exc_GST) AS gross_revenue_exc_gst,
+  COUNT(DISTINCT OrderId) AS orders,
+  SUM(ItemQty) AS units
+FROM `frido-429506.production.fact_all_platform_sales_report`
+WHERE OrderDate BETWEEN '${start}' AND '${end}'
+  AND NOT (OrderId LIKE '%_EX%')
+GROUP BY masterskucode
+ORDER BY gross_revenue_inc_gst DESC
+LIMIT 10
+```
+- GROUP BY `masterskucode` only — never COALESCE with ChannelSKUCode or ProductId
+- Never REGEXP_REPLACE or UPPER/TRIM the SKU column — use it as-is
+
 ## EXACT SQL template for revenue by channel — use this, never invent filters
 ```sql
 SELECT Channel, 
@@ -64,11 +81,54 @@ ORDER BY gross_revenue_inc_gst DESC
 - Do NOT add RTV filters, Credit Note filters, Order_Type filters, payment_type filters, or any channel-level exclusions
 - All 12 channels appear naturally: Shopify, Amazon, offline_sales, Retail, Flipkart, Blinkit, Myntra, Instamart, Zepto, CRED, Firstcry, International
 
+## EXACT query for total inventory — use this, never invent
+
+Total inventory lives in Supabase `inv_snapshot`. You MUST join against `facility_master` and filter `fcs_status_for_invt = 'Live'` — without this filter you include ~40 retired/Not-Live facilities and get a number ~7x too high.
+
+```sql
+-- Total sellable inventory across all Live facilities
+SELECT
+  SUM(
+    CASE
+      -- Vadgaon_OPS and Frido_Sudhawadi: pre-computed RTD/Raw split, use as-is (no pack-qty scaling)
+      WHEN i.facility IN ('Vadgaon_OPS', 'Frido_Sudhawadi')
+        THEN COALESCE(i.rtd_invt, 0) + COALESCE(i.raw_invt, 0) + COALESCE(i.raw_blocked_invt, 0)
+      -- All other Live facilities: scale by pack_qty only for RAW SKUs
+      -- RAW SKU = item_sku_code contains 'RAW', or matches standalone '-RW'/'-RWA' segment
+      WHEN i.item_sku_code ~* 'RAW|[_-]RWA?([_-]|$)'
+        THEN (COALESCE(i.inventory, 0) + COALESCE(i.inventory_blocked, 0))
+             * COALESCE(NULLIF(CAST(regexp_match(i.item_sku_code, 'P[O0][_\s]*(\d+)')[1] AS INT), 0), 1)
+      -- RTD SKUs: inventory (available) + inventory_blocked, no scaling
+      ELSE COALESCE(i.inventory, 0) + COALESCE(i.inventory_blocked, 0)
+    END
+  ) AS total_inventory_units
+FROM inv_snapshot i
+JOIN facility_master f ON i.facility = f.facility
+WHERE f.fcs_status_for_invt = 'Live'
+  AND i.item_sku_code NOT ILIKE '%COUP%'
+  AND i.item_sku_code NOT ILIKE '%DFA%'
+```
+
+**Critical rules — never break these:**
+- `fcs_status_for_invt = 'Live'` is MANDATORY. Omitting it inflates total by ~7x (includes WareIQ, Zippee, old Vadgaon, FBA, factory facilities).
+- Pack-qty scaling (`× PO##`) applies ONLY to RAW SKUs (item_sku_code contains 'RAW' or standalone '-RW'/'-RWA'). Never apply it to all SKUs.
+- `Vadgaon_OPS` and `Frido_Sudhawadi` have pre-computed RTD/Raw/RawBlocked columns — use those as-is, do NOT apply pack-qty logic.
+- Exclude pseudo-SKUs: `COUP` and `DFA` in item_sku_code.
+- The 8 Live Regular WH locations are: PNQ (Vadgaon_OPS, Frido_Sudhawadi), GGN (Hexalog_GGN2), BLR (myfrido-BLR_Hexalog), MUM (Beyond_Mum), KOL (Aaj_Kol_Item), HYD (Losung_Hyderabad), CHN (Losung_Chennai).
+- "Unmapped" facility rows (facility not in facility_master) = not Live, exclude them.
+
 ## Default behaviors (critical — wrong answers come from ignoring these)
 
 ### Logistics
 - **Forward shipments only by default** — never include reverse unless user asks
 - NDD couriers: Delhivery NDD (AWB starts `5448`), Skye Air, Urbane Bolt, ElasticRun
+- **Pending shipments** — use EXACTLY this dashboard unified_status mapping (from `api/logistics.js`):
+  - Delivered: `clickpost_unified_status = 'Delivered'` OR (`= 'NoStatusExist'` AND `latest_remark LIKE '%delivered%'`)
+  - RTO: `clickpost_unified_status IN ('RTO-Marked','RTO-ShipmentDelay','RTO-InTransit','RTO-Delivered','RTO-Requested','RTO-ContactCustomerCare','RTO-OutForDelivery','RTO-Failed')`
+  - Pickup Pending: `clickpost_unified_status IN ('PickupFailed','OutForPickup','PickupPending','OrderPlaced')`
+  - Intransit: `clickpost_unified_status IN ('ShipmentHeld','ContactCustomerCare','InTransit','DestinationHubIn','FailedDelivery','ShipmentDelayed','PickedUp','OutForDelivery','OriginCityOut','OriginCityIn')`
+  - Terminal (not pending): Cancelled, Lost, Damaged, RTO-Delivered
+  - **Pending = Pickup Pending + Intransit** — count shipments whose `clickpost_unified_status` falls in either group above
 
 ### Sales / Revenue
 - Credit Notes → **excluded** by default
@@ -94,6 +154,15 @@ ORDER BY gross_revenue_inc_gst DESC
 - **ebo**: Channel='Retail', SubChannel='Retail Store'
 - **offline**: offline_sales
 - **international**: Channel='International'
+
+## When data is not available for the requested date/period
+If the user asks for a specific month, date, or range and the table has no data for that period — **stop immediately and say so**. Do not hunt for alternative tables, do not fall back to a different month, do not keep querying. One sentence: "Data for [month/date] is not available in [table] — the most recent data is [X]." Then stop.
+
+Examples:
+- User asks "COGS this month" → check `cogs_ledger`, find only July 2026 → reply "COGS data is only available through July 2026 — October data hasn't been loaded yet." Done.
+- User asks "sales on 2025-03-01" → no rows for that date → reply "No sales data found for that date." Done.
+
+Never burn multiple tool calls trying to find the data elsewhere. Data not in the expected table = data not available.
 
 ## When to ask vs assume
 Ask ONLY if the ambiguity would change the number materially:
@@ -124,6 +193,7 @@ Options must be real values found while exploring — never invented.
 - `_EX` suffix orders must always be excluded or you'll double-count exchanges
 - GST rate: use `GST_Tax_Type_Code` from item master, not other GST columns
 - BQ column is `masterskucode` (lowercase), not `MasterSKU`
+- **NEVER use COALESCE(masterskucode, ChannelSKUCode, ProductId) for SKU grouping** — this fragments revenue across multiple rows and produces wrong totals. Always GROUP BY `masterskucode` directly. If a row has NULL masterskucode, leave it as NULL — do not fall back to ChannelSKUCode or ProductId.
 - BQ payment column is `payment_type`, not `PaymentMode`
 - Supabase inventory columns: `rtd_invt`, `raw_invt`, `raw_blocked_invt` (not rtd_qty etc.)
 - **Net Revenue ALWAYS uses mature window rates, not current-period rates** — compute RTO/CIR/Cancel% from today-44d to today-14d window, then apply those rates against current-period gross exc GST. Using current-period rates will give wrong (lower) net rev because recent orders haven't had time to return yet. Confirmed matches dashboard at ₹17.71 Cr vs ₹17.81 Cr (Oct 1-23 2026 D2C).
