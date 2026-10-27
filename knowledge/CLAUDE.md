@@ -17,7 +17,8 @@
 |---|---|
 | `production.fact_all_platform_sales_report` | All sales, revenue, returns, RTO, CIR, orders, units |
 | `production.Clickpost_Shipment_Tracking_Report` | Logistics: delivery rate, RTO%, TAT, courier performance, **shipment cost, delivery cost, freight cost, cost per shipment** — this is the ONLY table for any courier cost question |
-| `production.Aggregated_uniware_sales_report` | Inward/receiving, warehouse movements |
+| `production.Aggregated_uniware_sales_report` | Inward/receiving, warehouse movements, **B2C unit sales for OOS/inventory-planning avg daily sale** |
+| `production.historical_inventory_till_date_UC` | Daily stock history per SKU per facility — used to find in-stock runs for OOS loss calculation |
 | `production.pincode_city_master` | State, city, region, tier mapping by pincode |
 | `sharepoint_to_gcp.Frido_Item_Master__frido_item_sku_master` | Product master: category, GST rate, weight, dimensions |
 | `sharepoint_to_gcp.Frido_Item_Master__productid_sku_mapping` | ProductId → MasterSKU aliases |
@@ -46,6 +47,7 @@ All percentage metrics below are **REVENUE-BASED** (÷ Gross Revenue Inc GST), n
 | Delivery Rate | locked formula below | Delivered shipments ÷ Total shipments (Clickpost) — see "EXACT formula for Delivery Rate" |
 | Stuck Shipments | locked formula below | Forward only, no RTO-% statuses, guard pre-2020 timestamps — see "EXACT formula for Stuck Shipments" |
 | DOI | locked formula below | Total inventory / Avg daily sale — use the "EXACT query for total inventory" section, do NOT read _inventory_shared.js |
+| Avg Daily Sale (OOS loss / inventory planning) | locked formula below | **DIFFERENT from Inventory Health's Avg Sale** — longest in-stock run method, not recent-days average. See "EXACT formula for Avg Daily Sale (OOS/planning)" section. |
 | Channel mapping | locked below | See channel groups section |
 
 ## EXACT formula for Gross Revenue — use this, never invent
@@ -454,6 +456,130 @@ WHERE OrderDate BETWEEN '${start}' AND '${end}'
 - Always exclude `_EX` orders, Credit Notes, and Amazon RTV (same as all revenue queries).
 - For "this week" use `DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY))` to `CURRENT_DATE()`.
 - For channel-level RTO %, add `GROUP BY Channel` and keep the same denominator logic.
+
+## EXACT formula for Avg Daily Sale (OOS loss / inventory planning) — use this, never invent
+
+**This is NOT the same as Inventory Health's "Avg Sale".** Do not collapse them into one formula.
+
+### Why they differ
+Inventory Health's Avg Sale = units ÷ days over the last 7/15/30 days. For an OOS SKU those recent days had zero sales because there was nothing to sell — so that average reads near 0, and an OOS-loss calculation using it would massively understate the real loss. The correct approach measures demand during the period when the SKU **could** sell — its longest in-stock run.
+
+### Step-by-step method
+
+**Step 1 — Find daily stock per SKU** from `production.historical_inventory_till_date_UC` (daily Unicommerce stock history). Live warehouses only (`fcs_status_for_invt = 'Live'` from `facility_master`). Stock per day = (inventory + inventory_blocked) × pack_qty. Pack qty extracted from SKU code suffix `_PO##` (e.g. `FR-ERFT-B1_RAW_PO05` → pack_qty = 5). SKU is "in stock" that day if total > 0.
+
+**Step 2 — Find the longest consecutive in-stock run in the last 180 days**, ending on or before the SKU's latest sales date. A day with no snapshot at all does NOT break a run (treat as in-stock). If two runs are equally long, use the more recent one.
+
+**Step 3 — Count B2C units sold during that run** from `production.Aggregated_uniware_sales_report`. B2C only — `uc_channel_desc = 'B2C Order'` OR not listed in the channel reference (unmapped = B2C, same rule as Inventory Health). Exclude B2B Order, Purchase Order, Stock transfer. Resolve SKU aliases via `sharepoint_to_gcp.Frido_Item_Master__productid_sku_mapping` (ProductId → masterskucode).
+
+**Step 4 — Divide:**
+```
+Avg daily sale = B2C units sold in longest in-stock run ÷ number of days in that run
+```
+
+**Step 5 — Fallback for thin data:** If the longest in-stock run is < 14 days OR the SKU had no in-stock run at all:
+```
+Avg daily sale = B2C units in last 180 days ÷ 180
+```
+**Always flag this fallback explicitly** — say "using 180-day fallback average (longest in-stock run < 14 days)".
+
+### OOS loss calculation
+Once avg daily sale is known:
+```
+Days OOS    = days since stock hit 0 (from inv_snapshot / historical_inventory_till_date_UC)
+OOS loss    = days_oos × avg_daily_sale × ASP (SellingPrice_Inc_GST from fact_all_platform_sales_report)
+```
+
+### Worked example — verify your calculation against this
+- **SKU:** FR-ERFT-B1 (Ergolift Footrest)
+- **Longest in-stock run:** 11 Sep 2026 – 9 Oct 2026 = **29 days**
+- **B2C units sold in that run:** 505
+- **Avg daily sale:** 505 ÷ 29 = **17.41 units/day**
+- **ASP:** ₹2,329
+- **Days OOS:** 17
+- **OOS loss:** 17 × 17.41 × ₹2,329 ≈ **₹6.89 L**
+
+If your calculation for FR-ERFT-B1 gives a materially different avg daily sale, recheck: (a) are you using the longest in-stock run not a rolling window, (b) is it B2C only, (c) is pack_qty scaling applied correctly.
+
+### EXACT SQL — Step 1+2: find longest in-stock run
+```sql
+WITH daily_stock AS (
+  -- Stock per SKU per day, summed across all Live facilities
+  SELECT
+    -- Resolve to master SKU by stripping _RAW/_PO## suffixes
+    REGEXP_REPLACE(item_sku_code, r'(_RAW)?(_PO\d+)?$', '') AS master_sku,
+    snapshot_date,
+    SUM(
+      (COALESCE(inventory, 0) + COALESCE(inventory_blocked, 0))
+      * COALESCE(CAST(REGEXP_EXTRACT(item_sku_code, r'_PO(\d+)') AS INT64), 1)
+    ) AS stock_units
+  FROM `frido-429506.production.historical_inventory_till_date_UC` h
+  JOIN `frido-429506.production.facility_master` f USING (facility)  -- adjust join key if needed
+  WHERE f.fcs_status_for_invt = 'Live'
+    AND snapshot_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 180 DAY)
+  GROUP BY master_sku, snapshot_date
+),
+in_stock_days AS (
+  SELECT master_sku, snapshot_date,
+    stock_units > 0 AS in_stock
+  FROM daily_stock
+),
+-- Number consecutive in-stock stretches using gaps-and-islands
+runs AS (
+  SELECT master_sku, snapshot_date, in_stock,
+    DATE_DIFF(snapshot_date,
+      DATE '2000-01-01',
+      DAY) - ROW_NUMBER() OVER (PARTITION BY master_sku, in_stock ORDER BY snapshot_date) AS grp
+  FROM in_stock_days
+  WHERE in_stock = TRUE
+),
+run_lengths AS (
+  SELECT master_sku,
+    MIN(snapshot_date) AS run_start,
+    MAX(snapshot_date) AS run_end,
+    COUNT(*) AS run_days
+  FROM runs
+  GROUP BY master_sku, grp
+)
+SELECT master_sku, run_start, run_end, run_days
+FROM run_lengths
+WHERE master_sku = '${sku}'
+ORDER BY run_days DESC, run_end DESC
+LIMIT 1
+```
+
+### EXACT SQL — Step 3: B2C units sold in a date range
+```sql
+SELECT
+  REGEXP_REPLACE(
+    COALESCE(m.masterskucode, REGEXP_REPLACE(s.item_sku_code, r'(_RAW)?(_PO\d+)?$', '')),
+    r'', ''
+  ) AS master_sku,
+  SUM(s.sale_qty) AS b2c_units
+FROM `frido-429506.production.Aggregated_uniware_sales_report` s
+LEFT JOIN `frido-429506.sharepoint_to_gcp.Frido_Item_Master__productid_sku_mapping` m
+  ON s.item_sku_code = m.productid
+WHERE s.sale_date BETWEEN '${run_start}' AND '${run_end}'
+  AND (s.uc_channel_desc = 'B2C Order' OR s.uc_channel_desc IS NULL)
+  AND REGEXP_REPLACE(
+        COALESCE(m.masterskucode, REGEXP_REPLACE(s.item_sku_code, r'(_RAW)?(_PO\d+)?$', '')),
+        r'', '') = '${sku}'
+GROUP BY master_sku
+```
+
+**Critical rules — never break these:**
+- Use longest in-stock run, NOT a fixed recent window like "last 30 days".
+- B2C only — exclude B2B Order, Purchase Order, Stock transfer from `Aggregated_uniware_sales_report`.
+- Apply the 14-day minimum run length fallback — a 1–3 day run gives a wildly misleading daily rate.
+- Always flag when 180-day fallback is used.
+- OOS loss uses ASP from `fact_all_platform_sales_report`, not a hardcoded price.
+
+**Wrong patterns — never use:**
+```
+❌ Avg daily sale = units in last 30 days ÷ 30  ← uses OOS days as zero-sale days, understates demand
+❌ Avg daily sale = sales_window total ÷ window_days  ← sales_window only has ~30 days, misses OOS period
+❌ Using total units (B2C + B2B + PO) instead of B2C only
+```
 
 ## When to ask vs assume
 Ask ONLY if the ambiguity would change the number materially:
